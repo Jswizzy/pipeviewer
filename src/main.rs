@@ -1,61 +1,25 @@
-use std::io::{Read, Write, ErrorKind, Result};
-use std::{io, env};
-use clap::{App, Arg};
-use std::fs::File;
-
-const CHUNK_SIZE: usize = 16 * 1024;
+use crossbeam::channel::{bounded, unbounded};
+use pipeviewer::{args::Args, read, stats, write};
+use std::io::Result;
+use std::thread;
 
 fn main() -> Result<()> {
-    let matches = App::new("pipeviewer")
-        .arg(Arg::with_name("infile")
-            .help("Read from a file instead of stdin"))
-        .arg(Arg::with_name("outfile")
-            .short("o").long("outfile")
-            .takes_value(true)
-            .help("Write output to a file instead of a stdout"))
-        .arg(Arg::with_name("silent")
-            .short("s")
-            .long("silent"))
-        .get_matches();
+    let Args {
+        infile,
+        outfile,
+        silent,
+    } = Args::parse();
 
-    let infile = matches.value_of("infile").unwrap_or_default();
-    let outfile = matches.value_of("outfile").unwrap_or_default();
-    let silent = if matches.is_present("silent") {
-        true
-    } else {
-        env::var("PV_SILENT").unwrap_or_default().is_empty()
-    };
+    let (stats_tx, stats_rx) = unbounded();
+    let (write_tx, write_rx) = bounded(1);
 
-    let mut reader: Box<dyn Read> = if !infile.is_empty() {
-        Box::new(File::open(infile)?)
-    } else {
-        Box::new(io::stdin())
-    };
+    let read_handle = thread::spawn(move || read::read(&infile, stats_tx, write_tx));
+    let stats_handle = thread::spawn(move || stats::stats(silent, stats_rx));
+    let write_handle = thread::spawn(move || write::write(&outfile, write_rx));
 
-    let mut writer: Box<dyn Write> = if !outfile.is_empty() {
-        Box::new(File::create(outfile)?)
-    } else {
-        Box::new(io::stdout())
-    };
+    read_handle.join().unwrap()?;
+    stats_handle.join().unwrap()?;
+    write_handle.join().unwrap()?;
 
-    let mut total_bytes = 0;
-    let mut buffer = [0; CHUNK_SIZE];
-    loop {
-        let num_read = match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(x) => x,
-            Err(_) => break,
-        };
-        total_bytes += num_read;
-        if !silent {
-            eprint!("\r{}", total_bytes);
-        }
-        if let Err(e) = writer.write_all(&buffer[..num_read]) {
-            if e.kind() == ErrorKind::BrokenPipe {
-                break;
-            }
-            return Err(e);
-        }
-    }
     Ok(())
 }
